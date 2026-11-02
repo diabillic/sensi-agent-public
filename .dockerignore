@@ -1,0 +1,5 @@
+*
+!requirements.txt
+!sensi_agent/
+**/__pycache__
+**/*.pyc

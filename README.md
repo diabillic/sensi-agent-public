@@ -71,12 +71,14 @@ iprak/sensi repository.
 
 ## Heating cost
 
-With `NATIONALGRID_USERNAME` and `NATIONALGRID_PASSWORD` set, a weekly report estimates what the heat
-cost, and a message goes out when a new gas bill posts:
+With `NATIONALGRID_USERNAME` and `NATIONALGRID_PASSWORD` set, a weekly report gives how long each zone
+ran and estimates the week's gas cost, and a message goes out when a new gas bill posts:
 
-> 🔥 Heating last week: about $14
-> Boiler ran 31 h (Hallway 25 h, Upstairs 12 h)
-> About 11 therms at about $1.25 each
+> 🔥 Gas last week: about $53
+> Hallway: 25 h 12 min
+> Upstairs: 11 h 54 min
+> Boiler: 31 h 30 min in all, since zones can run together
+> About $38 for heat (26 therms), $15 for hot water, cooking and fixed charges (3 therms)
 
 **How it's worked out:**
 
@@ -86,9 +88,13 @@ cost, and a message goes out when a new gas bill posts:
    when gas only goes to hot water and cooking.
 3. **Burn rate:** a bill's therms minus the non-heating gas, divided by the hours the heat ran in that
    bill's period. The rated BTU/h isn't used, since a modulating boiler often runs well below it.
-4. **Price of a therm:** delivery charges are tiered, so a bill's total divided by its therms overstates
-   what extra heat costs. The price is how much delivery rises per therm across the busier half of the
-   last 12 bills, plus the latest bill's supply price.
+4. **Total cost:** the week's therms (heat plus non-heating gas), with delivery read off the last 12
+   bills at that rate of use, which takes in the fixed charge and every tier, plus supply at the latest
+   bill's price. Heat's share is what it adds to the cost of the non-heating gas alone.
+
+`sensi_gas_cost` also gives the cost of one more therm, which is lower than heat's average cost because
+delivery's cheapest tier is the last one reached: how much delivery rises per therm across the busier
+half of the last 12 bills, plus the latest supply price.
 
 **Limits to keep in mind:**
 
@@ -179,7 +185,7 @@ With `AGENT_BUS_TOKEN` set, `http://<host>:<BUS_HOST_PORT>/mcp` serves these too
 |---|---|
 | `sensi_status` | Each thermostat's room temperature, humidity, mode, set temperatures, and what's running |
 | `sensi_history` | Recent changes, optionally for one thermostat |
-| `sensi_gas_cost` | With a National Grid login: boiler hours, estimated therms and cost for a number of days, and recent bills |
+| `sensi_gas_cost` | With a National Grid login: hours per zone and for the boiler, estimated therms and total cost for a number of days, and recent bills |
 | `agent_status` | Revision, uptime and open problems |
 
 ## Troubleshooting

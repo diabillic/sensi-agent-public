@@ -7,7 +7,8 @@ from sensi_agent import gas as gas_module
 from sensi_agent.__main__ import Agent, bus_tools
 from sensi_agent.bus import Runtime
 from sensi_agent.config import Config
-from sensi_agent.gas import DAY, Gas, baseline, calibrate, delivery_slope, normalize, price_per_therm, window
+from sensi_agent.gas import (DAY, Gas, baseline, calibrate, delivery_per_day, delivery_slope, gas_cost, normalize,
+                             price_per_therm, window)
 from sensi_agent.state import State
 from sensi_agent.watch import Watcher
 
@@ -219,11 +220,55 @@ def test_weekly_report_with_a_cost(gas, mail):
     assert gas.tick(SUNDAY)
     msg = mail.messages[0]
     rate = calibrate(YEAR, gas.data["days"])["therms_per_hour"]
-    cost = 35 * rate * price_per_therm(YEAR)["total"]
-    assert msg.title == f"🔥 Heating last week: about ${cost:.0f}"
+    total = gas_cost(YEAR, 35 * rate + baseline(YEAR) * 7, 7)
+    assert msg.title == f"🔥 Gas last week: about ${total:.0f}"
     body = msg.markdown()
-    assert "Boiler ran 35 h (Hallway 35 h)" in body and "Watched" not in body
+    assert "Hallway: 35 h 0 min" in body and "Boiler: 35 h 0 min in all" in body and "Watched" not in body
+    assert "for heat" in body and "fixed charges" in body
     assert not gas.tick(SUNDAY + 60) and len(mail.messages) == 1
+
+
+def test_report_lists_each_zone_even_one_that_never_ran(gas, mail, state):
+    calibrated(gas)
+    gas.data["last_report"] = "2026-02-01"
+    state["thermostats"]["x"] = {"name": "Upstairs", "state": {}}
+    gas.tick(SUNDAY)
+    body = mail.messages[0].markdown()
+    assert "Hallway: 35 h 0 min" in body and "Upstairs: 0 min" in body and "zones can run together" in body
+
+
+def test_heat_and_other_gas_add_up_to_the_total(gas):
+    calibrated(gas)
+    ran = window(gas.data["days"], "2026-02-01", "2026-02-08")
+    est = gas.estimate(ran, 7)
+    assert est["estimated_total_cost"] == pytest.approx(est["estimated_heat_cost"] + est["estimated_other_cost"], abs=0.02)
+    assert est["estimated_heat_cost"] > 0 and est["estimated_other_cost"] > 0
+
+
+def test_a_bills_own_usage_costs_about_that_bill():
+    january = YEAR[-1]
+    assert gas_cost(YEAR, january["therms"], january["days"]) == pytest.approx(january["delivery"] + january["supply"], abs=0.5)
+
+
+def test_delivery_between_two_bills_is_interpolated():
+    bills = [bill("2026-01-01", "2026-01-11", 10, 10, 30), bill("2026-01-11", "2026-01-21", 10, 30, 50)]
+    assert delivery_per_day(bills, 2) == pytest.approx(4)
+    assert delivery_per_day(bills, 0.1) == pytest.approx(3)
+
+
+def test_delivery_above_every_bill_keeps_rising():
+    top = YEAR[-1]["delivery"] / YEAR[-1]["days"]
+    assert delivery_per_day(YEAR, 50) > top
+
+
+def test_two_bills_at_the_same_usage_do_not_divide_by_zero():
+    bills = [bill("2026-01-01", "2026-01-11", 10, 10, 30), bill("2026-01-11", "2026-01-21", 10, 10, 40)]
+    assert delivery_per_day(bills, 1) in (3, 4)
+
+
+def test_status_without_bills(gas):
+    out = gas.status(7, SUNDAY)
+    assert out["estimated_total_cost"] is None and out["estimated_other_cost"] is None
 
 
 def test_report_before_the_first_calibration_gives_hours(gas, mail):
@@ -233,7 +278,7 @@ def test_report_before_the_first_calibration_gives_hours(gas, mail):
     gas.data["last_report"] = "2026-02-01"
     gas.data["days"] = days_covering("2026-02-01", 7, 5)
     gas.tick(SUNDAY)
-    assert mail.messages[0].title == "🔥 Heating last week: 35 h of run time"
+    assert mail.messages[0].title == "🔥 Heating last week: 35 h 0 min of run time"
     assert "after the next gas bill" in mail.messages[0].markdown()
 
 
@@ -341,7 +386,7 @@ def test_status_covers_the_days_asked_for(gas):
     calibrated(gas)
     out = gas.status(3, ts("2026-02-05T12:00:00"))
     assert out["from"] == "2026-02-03" and out["through"] == "2026-02-05"
-    assert out["boiler_hours"] == 15 and out["estimated_cost"] > 0 and len(out["recent_bills"]) == len(YEAR)
+    assert out["boiler_hours"] == 15 and out["estimated_total_cost"] > 0 and len(out["recent_bills"]) == len(YEAR)
 
 
 def test_bus_tool_only_with_a_login(state, gas):

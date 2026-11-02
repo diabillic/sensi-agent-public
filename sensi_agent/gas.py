@@ -11,6 +11,7 @@ National Grid has no official API for this: see README.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import queue
 import statistics
@@ -25,7 +26,7 @@ from py_nationalgrid import InvalidAuthError, NationalGridClient, NationalGridCo
 from .findings import Finding
 from .notice import Message, Section
 from .state import State
-from .watch import GAP, action
+from .watch import GAP, _duration, action
 
 log = logging.getLogger(__name__)
 logging.getLogger("py_nationalgrid").setLevel(logging.WARNING)  # its debug output names the account
@@ -110,6 +111,27 @@ def price_per_therm(bills: list[dict]) -> dict | None:
             "supply_from_bill": usable[-1]["end"]}
 
 
+def delivery_per_day(bills: list[dict], therms_per_day: float) -> float | None:
+    """Delivery charges a day at a usage rate, read off the recent bills. Going by the bills themselves
+    takes in the fixed charge and every tier, which a price per therm can't."""
+    points = sorted((b["therms"] / b["days"], b["delivery"] / b["days"]) for b in bills[-RECENT_BILLS:] if b["days"] > 0)
+    if not points:
+        return None
+    if therms_per_day <= points[0][0]:
+        return points[0][1]
+    for (x0, y0), (x1, y1) in itertools.pairwise(points):
+        if therms_per_day <= x1:
+            return y0 + (y1 - y0) * (therms_per_day - x0) / (x1 - x0) if x1 > x0 else y1
+    return points[-1][1] + (therms_per_day - points[-1][0]) * (delivery_slope(bills) or 0)  # colder than any bill
+
+
+def gas_cost(bills: list[dict], therms: float, days: float) -> float | None:
+    """What `therms` over `days` would come to on a bill: delivery, plus supply at the latest bill's price."""
+    price = price_per_therm(bills)
+    delivery = delivery_per_day(bills, therms / days) if days > 0 else None
+    return None if price is None or delivery is None else delivery * days + therms * price["supply"]
+
+
 def window(days: dict, first: str, stop: str) -> dict:
     """Run time from date `first` up to but not including `stop`, in seconds."""
     total = {"watched": 0.0, "boiler": 0.0, "thermostats": {}}
@@ -148,10 +170,6 @@ def calibrate(bills: list[dict], days: dict) -> dict | None:
         if found:
             return found
     return None
-
-
-def _hours(seconds: float) -> str:
-    return f"{seconds / 3600:.0f} h" if seconds >= 3600 else f"{seconds / 60:.0f} min"
 
 
 def _short(day: str) -> str:
@@ -235,34 +253,50 @@ class Gas:
 
     # --- What gets said ---
 
-    def estimate(self, ran: dict) -> dict:
-        """Run time in a period turned into therms and dollars, as far as the bills allow."""
+    def zones(self, ran: dict) -> dict:
+        """Seconds each thermostat called for heat, including any that never did."""
+        known = {e["name"]: 0 for e in self.state["thermostats"].values() if e.get("name")}
+        return dict(sorted({**known, **ran["thermostats"]}.items()))
+
+    def estimate(self, ran: dict, days: float) -> dict:
+        """Run time over `days` turned into therms and dollars, as far as the bills allow. The whole
+        bill is costed first, and heat's share is what it adds to the cost of the other gas alone."""
         bills = self.data.get("bills", [])
-        rate, price = calibrate(bills, self.data.get("days", {})), price_per_therm(bills)
+        rate, base = calibrate(bills, self.data.get("days", {})), baseline(bills)
         out = {"boiler_hours": round(ran["boiler"] / 3600, 1), "watched_days": round(ran["watched"] / DAY, 1),
-               "hours_by_thermostat": {k: round(v / 3600, 1) for k, v in sorted(ran["thermostats"].items())},
-               "burn_rate": rate, "price_per_therm": price, "estimated_therms": None, "estimated_cost": None}
-        if rate:
-            therms = ran["boiler"] / 3600 * rate["therms_per_hour"]
-            out["estimated_therms"] = round(therms, 1)
-            if price:
-                out["estimated_cost"] = round(therms * price["total"], 2)
+               "hours_by_thermostat": {k: round(v / 3600, 1) for k, v in self.zones(ran).items()},
+               "burn_rate": rate, "cost_of_one_more_therm": price_per_therm(bills), "estimated_heat_therms": None,
+               "estimated_other_therms": None, "estimated_total_cost": None, "estimated_heat_cost": None,
+               "estimated_other_cost": None}
+        if base is None or days <= 0:
+            return out
+        other = base * days
+        other_cost = gas_cost(bills, other, days)
+        out["estimated_other_therms"] = round(other, 1)
+        if other_cost is not None:
+            out["estimated_other_cost"] = round(other_cost, 2)
+        if rate and other_cost is not None:
+            heat = ran["boiler"] / 3600 * rate["therms_per_hour"]
+            total_cost = gas_cost(bills, heat + other, days)
+            out["estimated_heat_therms"] = round(heat, 1)
+            out["estimated_total_cost"] = round(total_cost, 2)
+            out["estimated_heat_cost"] = round(max(0.0, total_cost - other_cost), 2)
         return out
 
     def report(self, first: str, stop: str) -> Message:
         ran = window(self.data.get("days", {}), first, stop)
-        est = self.estimate(ran)
         span = (date.fromisoformat(stop) - date.fromisoformat(first)).days
-        by_thermostat = ", ".join(f"{k} {_hours(v * 3600)}" for k, v in est["hours_by_thermostat"].items())
-        lines = [f"Boiler ran {_hours(ran['boiler'])}" + (f" ({by_thermostat})" if by_thermostat else "")]
-        if est["estimated_cost"] is not None:
-            title = f"🔥 Heating last week: about ${est['estimated_cost']:.0f}"
-            lines.append(f"About {est['estimated_therms']:.0f} therms at about "
-                         f"${est['price_per_therm']['total']:.2f} each")
-            lines.append(f"Burn rate {est['burn_rate']['therms_per_hour']:.2f} therms per hour, "
-                         f"from the bill ending {_short(est['burn_rate']['bill_end'])}")
+        est = self.estimate(ran, span)
+        zones = self.zones(ran)
+        lines = [f"{name}: {_duration(seconds)}" for name, seconds in zones.items()]
+        lines.append(f"Boiler: {_duration(ran['boiler'])} in all" + (", since zones can run together" if len(zones) > 1 else ""))
+        if est["estimated_total_cost"] is not None:
+            title = f"🔥 Gas last week: about ${est['estimated_total_cost']:.0f}"
+            lines.append(f"About ${est['estimated_heat_cost']:.0f} for heat "
+                         f"({est['estimated_heat_therms']:.0f} therms), ${est['estimated_other_cost']:.0f} for hot water, "
+                         f"cooking and fixed charges ({est['estimated_other_therms']:.0f} therms)")
         else:
-            title = f"🔥 Heating last week: {_hours(ran['boiler'])} of run time"
+            title = f"🔥 Heating last week: {_duration(ran['boiler'])} of run time"
             lines.append("The cost starts after the next gas bill: it takes a bill's worth of run time "
                          "to work out what the boiler burns")
         if ran["watched"] < (span - 0.1) * DAY:
@@ -342,12 +376,14 @@ class Gas:
         days = max(1, min(int(days), 365))
         today = datetime.fromtimestamp(now).date()
         first = today - timedelta(days=days - 1)
+        elapsed = (now - datetime.combine(first, clock()).timestamp()) / DAY
         bills = self.data.get("bills", [])
         base = baseline(bills)
         return {"from": first.isoformat(), "through": today.isoformat(),
                 **self.estimate(window(self.data.get("days", {}), first.isoformat(),
-                                       (today + timedelta(days=1)).isoformat())),
+                                       (today + timedelta(days=1)).isoformat()), elapsed),
                 "non_heating_therms_per_day": round(base, 2) if base is not None else None,
                 "recent_bills": bills[-RECENT_BILLS:],
                 "note": "A rough estimate: boiler hours from the thermostats, burn rate and prices from the bills. "
-                        "Cost is for the extra gas heat uses, not a share of fixed charges."}
+                        "Total cost is all gas including fixed charges; heat cost is what heat adds to that. "
+                        "Thermostat hours overlap, so they can add up to more than the boiler hours."}

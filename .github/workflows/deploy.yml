@@ -57,11 +57,15 @@ jobs:
           HISTORY_SIZE: ${{ vars.HISTORY_SIZE }}
           AGENT_BUS_PORT: ${{ vars.AGENT_BUS_PORT }}
           BOT_ALERT_URL: ${{ vars.BOT_ALERT_URL }}
+          GAS_REPORT_DAY: ${{ vars.GAS_REPORT_DAY }}
+          GAS_REPORT_HOUR: ${{ vars.GAS_REPORT_HOUR }}
           AGENT_BUS_TOKEN: ${{ secrets.AGENT_BUS_TOKEN }}
           SENSI_CLIENT_ID: ${{ secrets.SENSI_CLIENT_ID }}
           SENSI_CLIENT_SECRET: ${{ secrets.SENSI_CLIENT_SECRET }}
           SENSI_REFRESH_TOKEN: ${{ secrets.SENSI_REFRESH_TOKEN }}
           NOTIFY_URLS: ${{ secrets.NOTIFY_URLS }}
+          NATIONALGRID_USERNAME: ${{ secrets.NATIONALGRID_USERNAME }}
+          NATIONALGRID_PASSWORD: ${{ secrets.NATIONALGRID_PASSWORD }}
         run: |
           [ -n "$SENSI_CLIENT_ID" ] && [ -n "$SENSI_CLIENT_SECRET" ] && [ -n "$SENSI_REFRESH_TOKEN" ] \
             || { echo "::error::secrets SENSI_CLIENT_ID, SENSI_CLIENT_SECRET and SENSI_REFRESH_TOKEN are required"; exit 1; }
@@ -70,7 +74,8 @@ jobs:
           cp -r sensi_agent requirements.txt Dockerfile .dockerignore stage/context/
           (umask 077; : > stage/agent.env)
           for v in NOTIFY_EVENTS OFFLINE_GRACE_MINUTES RENOTIFY_HOURS RESYNC_SECONDS HISTORY_SIZE AGENT_BUS_PORT \
-                   BOT_ALERT_URL AGENT_BUS_TOKEN SENSI_CLIENT_ID SENSI_CLIENT_SECRET SENSI_REFRESH_TOKEN NOTIFY_URLS; do
+                   BOT_ALERT_URL GAS_REPORT_DAY GAS_REPORT_HOUR AGENT_BUS_TOKEN SENSI_CLIENT_ID SENSI_CLIENT_SECRET SENSI_REFRESH_TOKEN NOTIFY_URLS \
+                   NATIONALGRID_USERNAME NATIONALGRID_PASSWORD; do
             if [ -n "${!v}" ]; then printf '%s=%s\n' "$v" "${!v}" >> stage/agent.env; fi
           done
           publish=""

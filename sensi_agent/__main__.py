@@ -11,6 +11,7 @@ from . import health
 from .bus import Approvals, BusTool, Runtime, schema, serve_mcp
 from .config import Config
 from .findings import Finding
+from .gas import Gas
 from .notify import Notifier
 from .sensi import AuthRejected, Feed, Tokens
 from .state import State
@@ -23,7 +24,7 @@ MAX_BACKOFF = 300
 LOGIN_ADVICE = "sign in at manager.sensicomfort.com and set a new SENSI_REFRESH_TOKEN (see README)"
 
 
-def bus_tools(runtime: Runtime, watcher: Watcher, state: State) -> list[BusTool]:
+def bus_tools(runtime: Runtime, watcher: Watcher, state: State, gas: Gas | None = None) -> list[BusTool]:
     """What the assistant may call: all read-only. Nothing in this agent can change a thermostat."""
 
     def status() -> dict:
@@ -35,7 +36,11 @@ def bus_tools(runtime: Runtime, watcher: Watcher, state: State) -> list[BusTool]
             changes = [c for c in changes if c["thermostat"].lower() == thermostat.lower()]
         return {"changes": changes[-max(1, min(int(limit), 500)):]}
 
-    return runtime.common_tools(check_is_destructive=False) + [
+    extra = [BusTool("sensi_gas_cost", "Sensi: rough cost of running the heat: boiler hours from the thermostats, "
+                     "priced from National Grid gas bills, with the recent bills.",
+                     schema({"days": {"type": "integer", "description": "Days to cover, including today, at most "
+                                      "365 (default 7)"}}), lambda days=7: gas.status(days))] if gas else []
+    return runtime.common_tools(check_is_destructive=False) + extra + [
         BusTool("sensi_status", "Sensi: each thermostat's room temperature, humidity, mode, set temperatures, "
                 "and whether the heat or AC is running.", schema(), status),
         BusTool("sensi_history", "Sensi: recent changes, oldest first: heat and AC turning on and off, set "
@@ -46,9 +51,10 @@ def bus_tools(runtime: Runtime, watcher: Watcher, state: State) -> list[BusTool]
 
 
 class Agent:
-    def __init__(self, cfg: Config, feed: Feed, watcher: Watcher, notifier: Notifier, state: State, runtime: Runtime):
+    def __init__(self, cfg: Config, feed: Feed, watcher: Watcher, notifier: Notifier, state: State, runtime: Runtime,
+                 gas: Gas | None = None):
         self.cfg, self.feed, self.watcher, self.notifier, self.state = cfg, feed, watcher, notifier, state
-        self.runtime = runtime
+        self.runtime, self.gas = runtime, gas
         self.connected, self.login_bad = False, False
         self.backoff, self.last_try = TICK, 0.0
         self.last_data = self.quiet_since = time.time()
@@ -92,9 +98,11 @@ class Agent:
             got = True
             self.last_data = self.quiet_since = time.time()
             self.notifier.changes(self.watcher.update(items if isinstance(items, list) else [items]))
+            if self.gas:
+                self.gas.observe(self.watcher.thermostats)
 
     def problems(self, now: float) -> list[Finding]:
-        found = []
+        found = self.gas.problems(now) if self.gas else []
         if self.login_bad:
             found.append(Finding("cloud:login", f"Sensi rejected the login: {LOGIN_ADVICE}", "error"))
         if now - self.last_data >= self.cfg.offline_grace_minutes * 60:
@@ -110,6 +118,8 @@ class Agent:
         problems = self.problems(now)
         changed = self.notifier.problems(problems)
         self.runtime.record(problems, None)
+        if self.gas and self.gas.tick(now):
+            changed = True
         if got or changed:
             self.state.save()
 
@@ -132,15 +142,19 @@ def main() -> None:
     notifier = Notifier(cfg.notify_urls, cfg.renotify_hours, state, cfg.events, cfg.bot_alert_url, cfg.bus_token)
     runtime = Runtime("sensi", revision=_revision())
     feed = Feed(Tokens(cfg.client_id, cfg.client_secret, cfg.refresh_token, cfg.tokens_path))
+    gas = None
+    if cfg.nationalgrid_username:
+        gas = Gas(state, cfg.nationalgrid_username, cfg.nationalgrid_password, notifier.outbox.send,
+                  cfg.gas_report_day, cfg.gas_report_hour)
     health.reset()
     if cfg.bus_token and cfg.bus_port:
         # No destructive tools, so no approval channel is needed.
-        serve_mcp("0.0.0.0", cfg.bus_port, cfg.bus_token, bus_tools(runtime, watcher, state),
+        serve_mcp("0.0.0.0", cfg.bus_port, cfg.bus_token, bus_tools(runtime, watcher, state, gas),
                   "sensi-agent", Approvals("sensi", [], mode="client"))
         health.endpoint("agent bus", f"http://127.0.0.1:{cfg.bus_port}/health")
-    log.info("Starting: events=%s resync=%ss grace=%smin bus=%s", ",".join(cfg.events), cfg.resync_seconds,
-             cfg.offline_grace_minutes, bool(cfg.bus_token))
-    Agent(cfg, feed, watcher, notifier, state, runtime).run()
+    log.info("Starting: events=%s resync=%ss grace=%smin bus=%s gas=%s", ",".join(cfg.events), cfg.resync_seconds,
+             cfg.offline_grace_minutes, bool(cfg.bus_token), bool(gas))
+    Agent(cfg, feed, watcher, notifier, state, runtime, gas).run()
 
 
 def _revision() -> str:

@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 
 EVENTS = ("hvac_on", "hvac_off", "setpoint", "mode")
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def _int(name: str, default: int) -> int:
@@ -43,6 +44,12 @@ class Config:
     bus_port: int = 8765
     bot_alert_url: str = ""
 
+    # National Grid login, for the heating cost report: both empty turns it off
+    nationalgrid_username: str = ""
+    nationalgrid_password: str = ""
+    gas_report_day: int = 6  # Monday is 0
+    gas_report_hour: int = 8
+
     @classmethod
     def from_env(cls) -> "Config":
         client_id = os.environ.get("SENSI_CLIENT_ID", "").strip()
@@ -54,6 +61,16 @@ class Config:
         unknown = sorted(set(events) - set(EVENTS))
         if unknown:
             raise SystemExit(f"NOTIFY_EVENTS: unknown {', '.join(unknown)} (choose from {', '.join(EVENTS)})")
+        ng_user = os.environ.get("NATIONALGRID_USERNAME", "").strip()
+        ng_password = os.environ.get("NATIONALGRID_PASSWORD", "")
+        if bool(ng_user) != bool(ng_password):
+            raise SystemExit("NATIONALGRID_USERNAME and NATIONALGRID_PASSWORD go together: set both or neither")
+        day = (os.environ.get("GAS_REPORT_DAY", "").strip() or "sun").lower()[:3]
+        if day not in WEEKDAYS:
+            raise SystemExit(f"GAS_REPORT_DAY must be a day of the week, got {day!r}")
+        hour = _int("GAS_REPORT_HOUR", 8)
+        if not 0 <= hour <= 23:
+            raise SystemExit(f"GAS_REPORT_HOUR must be from 0 to 23, got {hour}")
         return cls(
             client_id=client_id,
             client_secret=client_secret,
@@ -69,4 +86,8 @@ class Config:
             bus_token=os.environ.get("AGENT_BUS_TOKEN", "").strip(),
             bus_port=_int("AGENT_BUS_PORT", 8765),
             bot_alert_url=os.environ.get("BOT_ALERT_URL", "").strip(),
+            nationalgrid_username=ng_user,
+            nationalgrid_password=ng_password,
+            gas_report_day=WEEKDAYS.index(day),
+            gas_report_hour=hour,
         )

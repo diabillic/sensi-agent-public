@@ -19,6 +19,8 @@ from Sensi or Sensi rejects its login, so silence never means it quietly broke.
 - **Room temperature alone doesn't notify,** since it moves all day. Assistants can read it.
 - **Agent bus (optional):** `sensi_status` and `sensi_history` for an MCP client such as Hermes.
 
+With a National Grid login it also [estimates what the heat costs](#heating-cost), weekly.
+
 Notifications go to any [Apprise](https://github.com/caronc/apprise) URL or a Discord webhook. A
 furnace can cycle several times an hour, so turn off `hvac_on` and `hvac_off` if that's too many, or
 give this agent its own channel.
@@ -67,6 +69,48 @@ from the saved one at the next deploy.
 this repository: copy `CLIENT_ID2` and `CLIENT_SECRET2` from `custom_components/sensi/auth.py` in the
 iprak/sensi repository.
 
+## Heating cost
+
+With `NATIONALGRID_USERNAME` and `NATIONALGRID_PASSWORD` set, a weekly report estimates what the heat
+cost, and a message goes out when a new gas bill posts:
+
+> 🔥 Heating last week: about $14
+> Boiler ran 31 h (Hallway 25 h, Upstairs 12 h)
+> About 11 therms at about $1.25 each
+
+**How it's worked out:**
+
+1. **Run time:** the hours any thermostat called for heat. Thermostats are assumed to share one boiler
+   or furnace, so two calling at once count once. AC isn't counted.
+2. **Non-heating gas:** the three lowest of the last 12 bills, as therms a day. That's normally summer,
+   when gas only goes to hot water and cooking.
+3. **Burn rate:** a bill's therms minus the non-heating gas, divided by the hours the heat ran in that
+   bill's period. The rated BTU/h isn't used, since a modulating boiler often runs well below it.
+4. **Price of a therm:** delivery charges are tiered, so a bill's total divided by its therms overstates
+   what extra heat costs. The price is how much delivery rises per therm across the busier half of the
+   last 12 bills, plus the latest bill's supply price.
+
+**Limits to keep in mind:**
+
+- **It's an estimate.** It works by month, because gas meters without AMI report no hourly data.
+- **Costs start after the first bill with enough run time:** at least half the period watched and
+  5 hours of heat. Before that the report gives hours only. Bills posted before the agent started
+  have no run time to compare with.
+- **Winter is likely a little high.** Hot water takes more gas when the incoming water is colder, and
+  that's counted as heat.
+- **The supply price lags,** since it comes from the latest bill. Each new bill corrects it.
+- **Short heat cycles can be missed,** as noted under `RESYNC_SECONDS`.
+
+**⚠️ National Grid has no official API for this either.** It uses the community
+[py-nationalgrid](https://github.com/virtitnerd/py-nationalgrid) library, which signs in as you, so it
+can break whenever National Grid changes something (you'd get a notification), and it may not be what
+their terms of service have in mind. Use it only for your own account. It has been tested with a
+downstate New York gas account, so other regions and accounts may differ.
+
+The agent signs in about once a day, keeps only each bill's dates, therms, delivery and supply charges,
+and doesn't store or log account numbers or addresses. The bills are in the data volume, and
+`sensi_gas_cost` gives them to anything holding the agent bus token.
+
 ## Deployment
 
 Every push to `main` runs the tests. The deploy job then sends the build context and a rendered
@@ -105,6 +149,8 @@ This repository contains **no secrets**. Set these under **Settings → Secrets 
 | `SENSI_CLIENT_ID` | **yes** | The web app's client id, see above. |
 | `SENSI_CLIENT_SECRET` | **yes** | The web app's client secret, see above. |
 | `NOTIFY_URLS` | no | Apprise URLs or Discord webhook URLs, comma separated. Without any, changes are only logged. |
+| `NATIONALGRID_USERNAME` | no | Your National Grid online account's sign-in. Set both to turn on [Heating cost](#heating-cost). |
+| `NATIONALGRID_PASSWORD` | no | That account's password. |
 | `AGENT_BUS_TOKEN` | no | A long random token (`openssl rand -base64 32`). Turns on the agent bus. |
 | `PUBLIC_DEPLOY_KEY` | no | Only for mirroring a private copy to a public one: the private half of an SSH key whose public half is a write deploy key on the public repository. |
 
@@ -119,6 +165,8 @@ This repository contains **no secrets**. Set these under **Settings → Secrets 
 | `RENOTIFY_HOURS` | no | Reminder interval for open problems (default 24). |
 | `RESYNC_SECONDS` | no | Reconnect for a full state when the cloud has sent nothing for this long (default 60, at least 30). Sensi appears to send state only when a connection starts, so changes are seen on this cycle (about 5 s longer than the value), and a heat cycle shorter than it can be missed. |
 | `HISTORY_SIZE` | no | Changes kept for `sensi_history` (default 500). |
+| `GAS_REPORT_DAY` | no | Day of the weekly heating cost report (default `sun`). |
+| `GAS_REPORT_HOUR` | no | Hour of that report, 0 to 23 (default 8). |
 | `BUS_HOST_PORT` | no | Host port for the agent bus. Empty publishes nothing. |
 | `AGENT_BUS_PORT` | no | The bus port inside the container (default 8765). |
 | `BOT_ALERT_URL` | no | Where to hand problem alerts to an assistant first. Changes always go to `NOTIFY_URLS`. |
@@ -131,6 +179,7 @@ With `AGENT_BUS_TOKEN` set, `http://<host>:<BUS_HOST_PORT>/mcp` serves these too
 |---|---|
 | `sensi_status` | Each thermostat's room temperature, humidity, mode, set temperatures, and what's running |
 | `sensi_history` | Recent changes, optionally for one thermostat |
+| `sensi_gas_cost` | With a National Grid login: boiler hours, estimated therms and cost for a number of days, and recent bills |
 | `agent_status` | Revision, uptime and open problems |
 
 ## Troubleshooting
@@ -140,4 +189,7 @@ With `AGENT_BUS_TOKEN` set, `http://<host>:<BUS_HOST_PORT>/mcp` serves these too
   something: see the iprak/sensi issues.
 - **Changes in the app sometimes don't apply while the agent runs:** iprak/sensi notes this happens
   occasionally with two sessions on one account.
+- **"National Grid rejected the login":** check the two secrets. It retries once a day, so a wrong
+  password can't lock the account quickly.
+- **"No gas bill data":** the library may need updating: see the py-nationalgrid issues.
 - **Temperatures show the wrong unit:** the agent reports what the thermostat is set to display.

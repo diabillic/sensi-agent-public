@@ -10,7 +10,8 @@ from typing import Any
 
 class State:
     # notified: alert dedupe · thermostats: last state seen per thermostat · history: {"changes": [...]}
-    SECTIONS = ("notified", "thermostats", "history")
+    # gas: boiler run time per day, gas bills, and what's been reported
+    SECTIONS = ("notified", "thermostats", "history", "gas")
 
     def __init__(self, path: str):
         self.path = path

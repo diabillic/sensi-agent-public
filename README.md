@@ -117,7 +117,7 @@ This repository contains **no secrets**. Set these under **Settings → Secrets 
 | `NOTIFY_EVENTS` | no | Any of `hvac_on`, `hvac_off`, `setpoint`, `mode`, comma separated (default all). Everything is still kept for `sensi_history`. |
 | `OFFLINE_GRACE_MINUTES` | no | How long a thermostat or the cloud must be gone before it's reported (default 15). Sensi can take about 10 minutes to mark a thermostat offline. |
 | `RENOTIFY_HOURS` | no | Reminder interval for open problems (default 24). |
-| `RESYNC_SECONDS` | no | Reconnect for a full state when the cloud has sent nothing for this long (default 60, at least 30). This is the longest a change can go unnoticed. |
+| `RESYNC_SECONDS` | no | Reconnect for a full state when the cloud has sent nothing for this long (default 60, at least 30). Sensi appears to send state only when a connection starts, so changes are seen on this cycle (about 5 s longer than the value), and a heat cycle shorter than it can be missed. |
 | `HISTORY_SIZE` | no | Changes kept for `sensi_history` (default 500). |
 | `BUS_HOST_PORT` | no | Host port for the agent bus. Empty publishes nothing. |
 | `AGENT_BUS_PORT` | no | The bus port inside the container (default 8765). |
